@@ -34,6 +34,8 @@ for prj_name in PROJECTS:
     # Let's iterate over all milestones
     # Unfortunately, LP doesn't allow to search over list of milestones
     bugs = prj.searchTasks(status=STATUS, created_since=CREATED_SINCE)
+    #milestone = prj.getMilestone(name='4.1.2')
+    #bugs = prj.searchTasks(milestone=milestone, status='Opinion')
 
     print("%s: amount of bugs found - %d" % (prj_name, len(list(bugs))))
     for (counter, bug) in enumerate(bugs, 1):
@@ -51,9 +53,6 @@ for prj_name in PROJECTS:
             min_milestone_name = bug_mstn.name
             # We don't want to target milestone, which is there
             # even if there is no series associated
-            # BUT we DO want to re-target milestone creating series for it
-            #  if we have to target this bug for other series. See code
-            #  explanations below
             milestones = [bug_mstn.name]
         else:
             min_milestone_name = dev_focus_milestone_name
@@ -69,6 +68,9 @@ for prj_name in PROJECTS:
             #  For instance, we filter search by milestone.
             if task.milestone is None:
                 # Apparently affecting only series, no milestone set
+                #TODO: As it seems to be impossible to update existing task,
+                # for unknown reason, we may want to lp_delete() and create
+                # task from scratch. We need to save assignee, etc. though.
                 continue
             milestone_name = task.milestone.name
             milestones.append(milestone_name)
@@ -139,24 +141,50 @@ for prj_name in PROJECTS:
         to_target_milestones += ml_to_add
         if to_target_milestones:
             print bug_info
-            # As we have to target some milestones, we need to re-target
-            # existing one, in order to ensure it doesn't disappear. It may
-            # happen with LP: you propose a new series 6.0.x for 5.1.2 bug, and
-            # it moves your 5.1.2 under 6.0.x. Then, script would put 6.0.1,
-            # and so your 5.1.2 will be gone.
-            # Example: https://bugs.launchpad.net/fuel/+bug/1398901/+activity
-            to_target_milestones.append(bug_mstn.name)
             to_target_milestones.sort()
             print("%s: ###### targeting to %s" %
                   (bug.bug.id, to_target_milestones))
 
             for tgt in to_target_milestones:
                 milestone = prj.getMilestone(name=tgt)
+                if tgt in milestones_map[dev_focus_series.name]:
+                    # This is real dirty magic. Needs refactoring.
+                    # LP, if you try to target dev focus series,
+                    # will move your bug data over new target. So, if you
+                    # had no-series bug with 5.1.2, and now targeting
+                    # 6.1.x, then you'll get moved all 5.1.2 data over.
+                    # To avoid data loss, we are exchanging data, and not
+                    # creating series if milestone is from current dev series
+                    s_milestone = bug.milestone
+                    s_status = bug.status
+                    s_importance = bug.importance
+                    s_assignee = bug.assignee
+                    if not DEBUG:
+                        try:
+                            bug.milestone = milestone
+                            bug.status = "New"
+                            bug.lp_save()
+                            changes += 1
+                            series = s_milestone.series_target.name
+                            target = BASE_URL + prj_name + '/' + series
+                            task_link = bug.bug.addTask(target=target)
+                            task_link.milestone = s_milestone
+                            task_link.status = s_status
+                            task_link.importance = s_importance
+                            task_link.assignee = s_assignee
+                            task_link.lp_save()
+                            continue
+                        except Exception as e:
+                            print('Error: {}'.format(e))
+
                 series = milestone.series_target.name
                 target = BASE_URL + prj_name + '/' + series
                 # It can raise exception - 400, if series already exists
                 if not DEBUG:
                     try:
+                        #TODO: if series already targeted, but not milestone,
+                        # then we will skip it - as addTask will return an
+                        # exception: series already exists
                         task_link = bug.bug.addTask(target=target)
                         # Series already changed at this point of time,
                         # lp_save() below is for milestone to change
