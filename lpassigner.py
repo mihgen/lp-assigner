@@ -5,6 +5,10 @@ STATUS = ['New', 'Confirmed', 'Triaged', 'In Progress', 'Incomplete']
 TRUNC = 0
 BASE_URL = 'https://api.launchpad.net/devel/'
 CREATED_SINCE = '2014-09-01'
+DEBUG = 0
+MAX_CHANGES = -1
+
+changes = 0
 
 # lpbugmanage is the app name. Can be anything
 lp = Launchpad.login_with(
@@ -21,37 +25,48 @@ for prj_name in PROJECTS:
     print("Dev focus milestone: %s" % dev_focus_milestone_name)
 
     older_series = [s for s in prj.series if s.name <= dev_focus_series.name]
-    older_milestones_names = []
+    milestones_map = {}
+    milestones_active_map = {}
     for s in older_series:
-        milestones = [m.name for m in s.active_milestones]
-        if milestones:
-            older_milestones_names.append(min(milestones))
-    print("Identified milestones for consideration: %s" %
-          older_milestones_names)
-    #bugs = []
+        milestones_active_map[s.name] = [m.name for m in s.active_milestones]
+        milestones_map[s.name] = [m.name for m in s.all_milestones]
+
     # Let's iterate over all milestones
     # Unfortunately, LP doesn't allow to search over list of milestones
     bugs = prj.searchTasks(status=STATUS, created_since=CREATED_SINCE)
 
     print("%s: amount of bugs found - %d" % (prj_name, len(list(bugs))))
     for (counter, bug) in enumerate(bugs, 1):
+        bug_id = bug.bug.id
+        print("Processing bug #%s..." % bug_id)
+        bug_info = ""
         bug_mstn = bug.milestone
-        print bug, bug_mstn
         # milestone can be None. It can be non-triaged bug
         # Not sure, if other related tasks could have milestone
-        series = []
         milestones = []
+
+        # Special list for milestones which are inconsistent with series
+        ml_to_add = []
         if bug_mstn is not None:
             min_milestone_name = bug_mstn.name
             # We don't want to target milestone, which is there
             # even if there is no series associated
+            # BUT we DO want to re-target milestone creating series for it
+            #  if we have to target this bug for other series. See code
+            #  explanations below
             milestones = [bug_mstn.name]
         else:
             min_milestone_name = dev_focus_milestone_name
 
+        bug_info = "** {} ** TOP bug object, milestone: {}\n".format(
+            bug_id, bug_mstn)
         for task in bug.related_tasks:
-            # We are gethering all series & milestones bug affects
-            series.append(task.target.name)
+            bug_info += "**** {} ** affects: {}, milestone: {}\n".format(
+                bug_id, task.target.name, task.milestone)
+            # We are gethering all milestones bug affects
+            # We are not interested in collecting series, as we think
+            #  that milestone is our primary key for all work with LP.
+            #  For instance, we filter search by milestone.
             if task.milestone is None:
                 # Apparently affecting only series, no milestone set
                 continue
@@ -61,41 +76,102 @@ for prj_name in PROJECTS:
                 # Looking for lowest milestone set, as we don't trust
                 # launchpad in sorting of tasks
                 min_milestone_name = milestone_name
-        if min_milestone_name >= dev_focus_milestone_name:
-            # It is whether non-triaged bug,
-            #   or has dev_focus/higher milestone only
-            print("Skipping this bug: non-triaged or"
-                  " has dev_focus/higher milestone only")
-            continue
 
-        print("Lowest milestone: %s" % min_milestone_name)
-        needed = filter(lambda x: x >= min_milestone_name,
-                        older_milestones_names)
+            if task.milestone.series_target.name != task.target.name:
+                # This is inconsistency which can exist in LP. For instance,
+                #  your bug can be assigned to 4.1.2 milestone in 6.0.x series
+                #  We want to fix that. All attempts to just update series
+                #  for existing bug task failed. So we have to remove bug task
+                #  and create it again.
+                print("%s: INCONSISTENCY DETECTED: series %s, milestone %s."
+                      " Deleting... " % (bug_id,
+                                         task.target.name, milestone_name))
+                if not DEBUG:
+                    # TODO: we need to save all status, assignee, etc.,
+                    #  and reapply it after
+                    task.lp_delete()
+                    changes += 1
+                ml_to_add.append(milestone_name)
 
-        # If we found that bug already targets "-updates", let's target
-        # all higher milestones including updates too.
-        # If it was only maintenance version, no 'updates' - then no need
-        # to touch higher -updates.
+        if not ml_to_add:
+            if min_milestone_name >= dev_focus_milestone_name:
+                # It is whether non-triaged bug,
+                #   or has dev_focus/higher milestone only
+                print("%s: Skipping this bug: non-triaged or"
+                      " has dev_focus/higher milestone only" % bug_id)
+                continue
+
+            if not any(len(x) > 3 for x in milestones):
+                # We don't want to any further processing with this bug:
+                # we want to target only bugs from maintenance milestones
+                # and maintenance are in format X.Y.Z, X.Y-updates,
+                # or X.Y.Z-updates, so certainly more than 3 sym
+                print("%s: This bug is not targeting any maintenance milestone,"
+                      " skipping." % bug_id)
+                continue
+
+        print("%s: Lowest milestone: %s" % (bug_id, min_milestone_name))
+        # This is real hack, but it does its job:
+        #  We need 6.0.x as min for any 6.0, 6.0.1, 6.0-updates, 6.0.1-updates
+        min_series_name = min_milestone_name[:3] + '.x'
+
+        # Without -updates for now...
+        needed_series_names = filter(
+            lambda x: x >= min_series_name,
+            [s.name for s in older_series if 'updates' not in s.name])
+        # Let's check if we have -updates
+        milestones_updates = [x for x in milestones if 'updates' in x]
+        if milestones_updates:
+            series_with_updates = [prj.getMilestone(name=x).series_target.name
+                                   for x in milestones_updates]
+            min_series_with_updates = min(series_with_updates)
+            needed_series_names += filter(
+                lambda x: x >= min_series_with_updates,
+                [s.name for s in older_series if 'updates' in s.name])
+
+        print("%s: Verifying that bug targets series: %s" %
+              (bug_id, needed_series_names))
         to_target_milestones = []
-        if filter(lambda x: "update" in x, milestones):
-            to_target_milestones = list(set(needed) - set(milestones))
-        # We want to target only bugs from maintenance milestones
-        # and maintenance are in format X.Y.Z, so ceraintly more than 3 sym
-        elif any(len(x) > 3 for x in milestones):
-            all_updates = filter(lambda x: "update" in x,
-                                 older_milestones_names)
-            to_target_milestones = list(set(needed) - set(milestones) -
-                                        set(all_updates))
+        for s in needed_series_names:
+            if not set(milestones_map[s]) & set(milestones):
+                to_target_milestones.append(min(milestones_active_map[s]))
 
+        to_target_milestones += ml_to_add
         if to_target_milestones:
-            print("###### %s: targeting to %s" %
+            print bug_info
+            # As we have to target some milestones, we need to re-target
+            # existing one, in order to ensure it doesn't disappear. It may
+            # happen with LP: you propose a new series 6.0.x for 5.1.2 bug, and
+            # it moves your 5.1.2 under 6.0.x. Then, script would put 6.0.1,
+            # and so your 5.1.2 will be gone.
+            # Example: https://bugs.launchpad.net/fuel/+bug/1398901/+activity
+            to_target_milestones.append(bug_mstn.name)
+            to_target_milestones.sort()
+            print("%s: ###### targeting to %s" %
                   (bug.bug.id, to_target_milestones))
-        for tgt in to_target_milestones:
-            milestone = prj.getMilestone(name=tgt)
-            series = milestone.series_target
-            ################ targeting code ################
+
+            for tgt in to_target_milestones:
+                milestone = prj.getMilestone(name=tgt)
+                series = milestone.series_target.name
+                target = BASE_URL + prj_name + '/' + series
+                # It can raise exception - 400, if series already exists
+                if not DEBUG:
+                    try:
+                        task_link = bug.bug.addTask(target=target)
+                        # Series already changed at this point of time,
+                        # lp_save() below is for milestone to change
+                        changes += 1
+                        milestone_target = BASE_URL + prj_name + \
+                            '/+milestone/' + tgt
+                        task_link.milestone = milestone_target
+                        task_link.lp_save()
+                    except Exception as e:
+                        print('Error: {}'.format(e))
 
         if counter > TRUNC and TRUNC > 0:
             break
+        if changes >= MAX_CHANGES and MAX_CHANGES != -1:
+            break
         if counter % 10 == 0:
             print("Processed %d bugs..." % counter)
+    print("Total changes made: %d" % changes)
