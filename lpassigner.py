@@ -64,7 +64,7 @@ def make_changes(prj, milestones_map, bug, to_target_milestones):
             except Exception as e:
                 print('Error: {}'.format(e))
 
-def bug_milestones(bug):
+def bug_milestones(bug, dev_focus_milestone_name):
     bug_info = ""
     bug_id = bug.bug.id
     bug_mstn = bug.milestone
@@ -117,7 +117,6 @@ def bug_milestones(bug):
                 # TODO: we need to save all status, assignee, etc.,
                 #  and reapply it after
                 task.lp_delete()
-                changes += 1
             ml_to_add.append(milestone_name)
     return (bug_info, milestones, ml_to_add, min_milestone_name)
 
@@ -152,7 +151,7 @@ def main():
             bug_id = bug.bug.id
             print("Processing bug #%s..." % bug_id)
             bug_info, milestones, ml_to_add, min_milestone_name = \
-                    bug_milestones(bug)
+                    bug_milestones(bug, dev_focus_milestone_name)
             if not ml_to_add:
                 if min_milestone_name >= dev_focus_milestone_name:
                     # It is whether non-triaged bug,
@@ -225,10 +224,9 @@ def main():
                                 created_since=CREATED_SINCE)
         # If current is 6.1.x, then previous is 6.0.x - which we want to target
         prev_series_name = older_series[-2].name
-        print("TOTAL BUGS TO PROCESS: Critical - %d, C-F - %d" % (len(list(bugs1)), len(list(bugs2))))
         for bug in itertools.chain(bugs1, bugs2):
             bug_info, milestones, ml_to_add, min_milestone_name = \
-                    bug_milestones(bug)
+                    bug_milestones(bug, dev_focus_milestone_name)
             to_target_milestones = ml_to_add
             if not set(milestones_map[prev_series_name]) & set(milestones):
                 to_target_milestones.append(min(milestones_active_map[prev_series_name]))
