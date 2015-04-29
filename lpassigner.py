@@ -116,7 +116,10 @@ def bug_milestones(bug, dev_focus_milestone_name):
             if not DEBUG:
                 # TODO: we need to save all status, assignee, etc.,
                 #  and reapply it after
-                task.lp_delete()
+                try:
+                    task.lp_delete()
+                except Exception as e:
+                    print('Error: {}'.format(e))
             ml_to_add.append(milestone_name)
     return (bug_info, milestones, ml_to_add, min_milestone_name)
 
@@ -193,7 +196,8 @@ def main():
             to_target_milestones = []
             for s in needed_series_names:
                 if not set(milestones_map[s]) & set(milestones):
-                    to_target_milestones.append(min(milestones_active_map[s]))
+                    if s in milestones_active_map and milestones_active_map[s]:
+                        to_target_milestones.append(min(milestones_active_map[s]))
 
             to_target_milestones += ml_to_add
             if to_target_milestones:
